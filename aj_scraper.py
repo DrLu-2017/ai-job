@@ -236,6 +236,89 @@ def fetch_academic_positions_jobs():
     driver.quit()
     return job_details
 
+def fetch_euraxess_jobs(job_type='phd'):
+    """Fetch jobs from EURAXESS portal
+    Args:
+        job_type (str): 'phd' or 'postdoc'
+    """
+    if job_type == 'phd':
+        url = "https://euraxess.ec.europa.eu/jobs/search?f%5B0%5D=job_is_eu_founded%3A546&f%5B1%5D=job_is_eu_founded%3A548&f%5B2%5D=job_is_eu_founded%3A4348&f%5B3%5D=job_is_eu_founded%3A4349&f%5B4%5D=job_is_eu_founded%3A6048&f%5B5%5D=job_research_profile%3A447&f%5B6%5D=positions%3Amaster_positions&f%5B7%5D=positions%3Aphp_positions"
+    else:  # postdoc
+        url = "https://euraxess.ec.europa.eu/jobs/search?f%5B0%5D=job_is_eu_founded%3A546&f%5B1%5D=job_is_eu_founded%3A548&f%5B2%5D=job_is_eu_founded%3A4348&f%5B3%5D=job_is_eu_founded%3A4349&f%5B4%5D=job_is_eu_founded%3A6048&f%5B5%5D=job_research_profile%3A447&f%5B6%5D=job_research_profile%3A448&f%5B7%5D=job_research_profile%3A449&f%5B8%5D=job_research_profile%3A450"
+
+    service = Service("./chromedriver.exe")
+    options = webdriver.ChromeOptions()
+    options.add_argument('--headless')
+    options.add_argument('--disable-gpu')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    driver = webdriver.Chrome(service=service, options=options)
+    driver.get(url)
+    time.sleep(3)  # Wait for dynamic content to load
+
+    jobs = []
+    try:
+        # Find all job listings
+        job_cards = driver.find_elements(By.CSS_SELECTOR, ".views-row")
+        print(f"检测到 EURAXESS {job_type} 职位数量: {len(job_cards)}")
+        
+        for card in job_cards[:10]:  # Limit to first 10 jobs
+            try:
+                # Extract job title and link
+                title_elem = card.find_element(By.CSS_SELECTOR, "h4 a")
+                title = title_elem.text.strip()
+                link = title_elem.get_attribute("href")
+                
+                # Extract institution and location
+                meta = card.find_element(By.CSS_SELECTOR, ".views-field-field-organisation").text.strip()
+                institution = meta
+                location = card.find_element(By.CSS_SELECTOR, ".views-field-field-country").text.strip()
+                
+                if title and link:
+                    jobs.append({
+                        "title": title,
+                        "institution": institution,
+                        "location": location,
+                        "link": link
+                    })
+            except Exception as e:
+                print(f"Error processing job card: {e}")
+                continue
+
+    except Exception as e:
+        print(f"Error fetching EURAXESS jobs: {e}")
+    finally:
+        driver.quit()
+
+    # Fetch job details for each position
+    job_details = []
+    driver = webdriver.Chrome(service=service, options=options)
+    for job in jobs:
+        try:
+            detail_title, detail_content, inst2, loc2, posted, contract = fetch_job_detail(driver, job['link'])
+            # Prefer detail page data, fallback to listing data
+            institution = inst2 or job.get('institution', '')
+            location = loc2 or job.get('location', '')
+            # Get AI highlight
+            highlight = ollama_highlight(detail_title + '\n' + detail_content)
+            
+            job_details.append({
+                "title": detail_title or job['title'],
+                "content": detail_content,
+                "link": job['link'],
+                "institution": institution,
+                "location": location,
+                "posted": posted,
+                "contract": contract,
+                "highlight": highlight
+            })
+        except Exception as e:
+            print(f"Error fetching job details: {e}")
+            continue
+    
+    driver.quit()
+    return job_details
+
 def generate_summary_article(job_details):
     classified = defaultdict(lambda: defaultdict(list))
     for job in job_details:
@@ -284,8 +367,22 @@ if __name__ == "__main__":
     if not check_ai_server():
         sys.exit(1)
         
-    job_details = fetch_academic_positions_jobs()
-    article = generate_summary_article(job_details)
+    # Fetch jobs from all sources
+    jobs = []
+    # Academic Positions
+    ap_jobs = fetch_academic_positions_jobs()
+    jobs.extend(ap_jobs)
+    
+    # EURAXESS PhD positions
+    phd_jobs = fetch_euraxess_jobs('phd')
+    jobs.extend(phd_jobs)
+    
+    # EURAXESS Postdoc positions
+    postdoc_jobs = fetch_euraxess_jobs('postdoc')
+    jobs.extend(postdoc_jobs)
+    
+    # Generate combined summary
+    article = generate_summary_article(jobs)
     with open('academic_job_summary.md', 'w', encoding='utf-8') as f:
         f.write(article)
     print('已生成 academic_job_summary.md，可直接粘贴到公众号后台。')
