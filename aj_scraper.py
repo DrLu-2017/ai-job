@@ -83,7 +83,7 @@ def ollama_summarize(text, model="deepseek-r1:70b", host="http://rf-calcul:11434
 def ollama_highlight(text, model="deepseek-r1:70b", host="http://rf-calcul:11434"):
     prompt = (
         "请用一句简短的陈述句总结该职位的最大优势或特色，直接描述核心亮点，不要有任何AI思考过程。"
-        "格式要求：不超过30字，只输出结论，不要有'该职位''这个岗位'等词。"
+        "格式要求：不超过50字，只输出结论，不要有'该职位''这个岗位'等词。"
         "\n" + text
     )
     payload = {
