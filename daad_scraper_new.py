@@ -275,7 +275,7 @@ def fetch_job_detail(driver, url, model="deepseek-r1:70b"):
         print(f"Error fetching job details: {e}")
         return None
 
-def find_job_listings(driver):
+def find_job_listings(driver, num_to_fetch=10):
     """Find job listing elements on the page"""
     print("Looking for job search functionality...")
     job_elements = []
@@ -340,7 +340,7 @@ def find_job_listings(driver):
                             preview = ' '.join(word.capitalize() for word in text.split()[:6])
                             print(f"Found relevant position: {preview}...")
                             
-                            if len(job_elements) >= 10:
+                            if len(job_elements) >= num_to_fetch:
                                 print("Found enough positions, stopping search...")
                                 return job_elements
                                 
@@ -364,7 +364,7 @@ def find_job_listings(driver):
                                       for kw in ['phd', 'doctoral', 'position']):
                             job_elements.append(link)
                             print(f"Found relevant link: {text[:50]}...")
-                            if len(job_elements) >= 10:
+                            if len(job_elements) >= num_to_fetch:
                                 break
                     except Exception as e:
                         continue
@@ -386,12 +386,13 @@ def find_job_listings(driver):
             print(f"Failed to save debug information: {debug_e}")
         return []
 
-def fetch_daad_jobs(use_headless=True, selected_model=None):
+def fetch_daad_jobs(use_headless=True, selected_model=None, num_jobs=10):
     """Main function to fetch PhD positions from DAAD
     
     Args:
         use_headless (bool): Whether to use headless browser mode
         selected_model (str): The AI model to use for generating highlights
+        num_jobs (int): The number of jobs to fetch
     """
     set_windows_proxy_from_pac("http://127.0.0.1:55624/proxy.pac")
     base_url = "https://www2.daad.de/deutschland/promotion/phd/en/13306-phd-germany-database/"
@@ -414,7 +415,7 @@ def fetch_daad_jobs(use_headless=True, selected_model=None):
         for attempt in range(max_retries):
             try:
                 print(f"\nAttempt {attempt + 1}/{max_retries} to find job listings...")
-                job_elements = find_job_listings(driver)
+                job_elements = find_job_listings(driver, num_jobs)
                 if job_elements:
                     break
                 else:
@@ -816,6 +817,7 @@ def ollama_highlight(text, model="deepseek-r1:70b", host=None):
         """    
         prompt = (
         f"请分析以下学术招聘信息，提取并总结该职位的主要亮点、特色和地理位置优势。\n\n"
+        f"If the job title or key details in the '招聘信息' (recruitment information) are in German, please first translate them into Chinese. Then, proceed with the analysis and summary in Chinese as requested.\n\n"
         f"要求：\n"
         f"1. 分析研究机构/大学的声誉、研究方向的前沿性、团队影响力和资源设备\n"
         f"2. 特别强调地理位置优势，包括：城市特色、气候环境、交通便利性、国际化程度、生活质量等\n"
@@ -1099,10 +1101,23 @@ if __name__ == "__main__":
         selected_model = select_model()
     
     print(f"\n使用模型: {selected_model}")
+
+    # Get number of jobs to scrape from user
+    num_jobs_to_scrape_str = input("How many job postings would you like to scrape? (Enter a number, default is 10): ")
+    try:
+        num_jobs_to_scrape = int(num_jobs_to_scrape_str)
+        if num_jobs_to_scrape <= 0:
+            print("Invalid input. Defaulting to 10 jobs.")
+            num_jobs_to_scrape = 10
+    except ValueError:
+        print("Invalid input. Defaulting to 10 jobs.")
+        num_jobs_to_scrape = 10
+    print(f"Will attempt to scrape {num_jobs_to_scrape} job postings.")
+
       # Phase 2: Fetch jobs
     print("\n=== Phase 2: Fetching Positions ===")
     try:
-        jobs = fetch_daad_jobs(use_headless=True, selected_model=selected_model)
+        jobs = fetch_daad_jobs(use_headless=True, selected_model=selected_model, num_jobs=num_jobs_to_scrape)
         if not jobs:
             print("\nNo positions found. Check the logs for errors.")
             sys.exit(1)
