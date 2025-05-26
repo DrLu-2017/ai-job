@@ -207,7 +207,7 @@ def fetch_job_detail(driver, url, model="deepseek-r1:70b"):
             try:
                 if validate_selector(selector):
                     element = find_element_with_retry(driver, By.CSS_SELECTOR, selector)
-                    if element:
+                    if element:                        
                         info['title'] = extract_text_with_fallback(element, selector)
                         if info['title']:
                             break
@@ -804,26 +804,23 @@ def select_model():
             return "deepseek-r1:70b"
 
 def ollama_highlight(text, model="deepseek-r1:70b", host=None):
-    """生成职位亮点，如果主模型失败则使用备用模型"""
+    """Generate position highlights, falling back to backup model if main model fails"""
     global default_server_url
     servers = [host] if host else ["http://rf-calcul:11434"]
     if default_server_url:
         if default_server_url in servers:
             servers.remove(default_server_url)
         servers.insert(0, default_server_url)    
-        example = """
-        蒙特利尔大学（Université de Montréal）位于北美著名文化名城蒙特利尔，城市环境宜居，交通便利，四季分明。校园提供卓越的学术环境，拥有世界级的研究资源和多元文化的国际社区。蒙特利尔作为加拿大第二大城市，文化氛围浓厚，生活成本适中，是国际学生的理想选择。
-        """    
-        prompt = (
-        f"请分析以下学术招聘信息，提取并总结该职位的主要亮点、特色和地理位置优势。\n\n"
-        f"要求：\n"
-        f"1. 分析研究机构/大学的声誉、研究方向的前沿性、团队影响力和资源设备\n"
-        f"2. 特别强调地理位置优势，包括：城市特色、气候环境、交通便利性、国际化程度、生活质量等\n"
-        f"3. 用中文输出一段简洁有力的描述（100-150字左右）\n"
-        f"4. 直接描述核心亮点，不要有'该职位'、'这个岗位'等词\n"
-        f"5. 使用吸引人的表述，突出最具竞争力的方面\n\n"
-        f"参考示例：\n{example}\n\n"
-        f"招聘信息：\n{text[:2000]}"
+    
+    prompt = (
+        f"Please analyze this academic position posting and summarize its key highlights, strengths, and location advantages.\n\n"
+        f"Requirements:\n"
+        f"1. Analyze institution reputation, research focus, team strength, and resources\n"
+        f"2. Emphasize location advantages: city characteristics, environment, accessibility, international atmosphere\n"
+        f"3. Output a concise description (100-150 words)\n"
+        f"4. Focus on core highlights\n"
+        f"5. Use engaging language to highlight competitive advantages\n\n"
+        f"Position details:\n{text[:2000]}"
     )
 
     payload = {
@@ -845,30 +842,29 @@ def ollama_highlight(text, model="deepseek-r1:70b", host=None):
     for server in servers:
         try:
             url = f"{server}/api/generate"
-            print(f"正在使用服务器 {server} 的 {model} 模型生成职位亮点...")
+            print(f"Using {model} model on {server} to generate highlights...")
             
             resp = requests.post(url, json=payload, headers=headers, timeout=600)
             resp.raise_for_status()
 
             result = resp.json()
             if not isinstance(result, dict) or "response" not in result:
-                print(f"API响应格式错误: {result}")
-                raise Exception("API响应格式错误")
+                print(f"Invalid API response format: {result}")
+                raise Exception("Invalid API response format")
 
             highlight = result["response"].strip()
-            print("亮点生成成功")
+            print("Successfully generated highlights")
             
             # Update the default server URL
             default_server_url = server
 
             # Clean up common AI prefixes
             common_prefixes = [
-                "这个职位的亮点是", "该岗位的优势在于", "职位亮点：",
-                "AI分析：", "让我分析：", "分析得出：", "总结：",
-                "亮点包括：", "特色在于：", "优势是：", "经分析，",
-                "根据描述，", "通过分析，", "主要亮点：",
-                "分析如下：", "职位分析：", "优势分析：", "特点如下：",
-                "思考过程：", "我的分析：", "我认为", "我觉得",
+                "highlights include", "key highlights:", "summary:", "analysis:",
+                "main points:", "key features:", "highlights:", "strengths:",
+                "advantages:", "position offers:", "overview:", "assessment:",
+                "key aspects:", "evaluation:", "review:", "analysis shows:",
+                "this position:", "main advantages:", "key benefits:",
             ]
             
             for prefix in common_prefixes:
@@ -882,21 +878,21 @@ def ollama_highlight(text, model="deepseek-r1:70b", host=None):
             return highlight
 
         except requests.exceptions.Timeout:
-            print(f"服务器 {server} 请求超时")
+            print(f"Request timeout for server {server}")
             last_error = "timeout"
             continue
         except Exception as e:
-            print(f"服务器 {server} 调用失败: {e}")
+            print(f"Failed to call server {server}: {e}")
             last_error = str(e)
             continue
 
     # If all servers failed, try backup model
     backup_model = "qwen3:30b-a3b"  # Updated backup model name
-    print(f"所有服务器都失败 ({last_error})，尝试备用模型 {backup_model}...")
+    print(f"All servers failed ({last_error}), trying backup model {backup_model}...")
 
     try:
         # Use a simpler prompt with backup model
-        simple_prompt = f"请用一段话总结以下学术招聘信息的主要亮点和特色：\n\n{text[:1000]}"
+        simple_prompt = f"Please summarize the key highlights and features of this academic position:\n\n{text[:1000]}"
         payload["model"] = backup_model
         payload["prompt"] = simple_prompt
 
@@ -919,48 +915,28 @@ def ollama_highlight(text, model="deepseek-r1:70b", host=None):
             except Exception:
                 continue
     except Exception as e:
-        print(f"备用模型失败: {e}")    # If all AI attempts fail, use enhanced simple extraction
-    print("所有模型都失败，使用增强的简单提取方法...")
+        print(f"Backup model failed: {e}")
+
+    # If all AI attempts fail, use simple extraction
+    print("All models failed, using simple extraction method...")
     # Extract key information from text
-    institution = re.search(r'(?:university|大学|学院|研究所|institute)[\s:]*([\w\s]+)', text, re.IGNORECASE)
-    location = re.search(r'(?:location|地点|位于)[\s:]*([\w\s,]+)', text, re.IGNORECASE)
-    field = re.search(r'(?:research|field|研究|领域)[\s:]*([\w\s,]+)', text, re.IGNORECASE)
-    
-    # City/region information extraction
-    city_match = re.search(r'(?:in|at|near|位于)?\s*((?:Frankfurt|Berlin|Munich|Hamburg|Cologne|Dresden|Stuttgart|Heidelberg|Aachen|Karlsruhe|Göttingen|Bonn|Leipzig|Freiburg|Münster|Tübingen|Konstanz|Mannheim|Darmstadt|Würzburg|München)(?:\s*am\s*(?:Main|Rhein|Neckar))?)', text, re.IGNORECASE)
-    
-    # Common German city characteristics
-    city_info = {
-        'Berlin': '德国首都，国际化大都市，文化艺术中心，创新创业活跃',
-        'Munich': '巴伐利亚州首府，高科技产业集群，生活质量极高，临近阿尔卑斯山',
-        'Frankfurt': '金融中心，交通枢纽，国际化程度高，生活便利',
-        'Hamburg': '德国第二大城市，港口城市，文化多元，环境优美',
-        'Heidelberg': '著名大学城，风景如画，学术氛围浓厚，适合求学',
-        'Dresden': '文化古城，高科技产业发达，生活成本适中，自然环境优美',
-        'Stuttgart': '工业重镇，汽车之都，创新驱动，文化底蕴深厚',
-        'Aachen': '德国最西部城市，邻近比利时和荷兰，工程技术实力雄厚',
-        'Göttingen': '传统大学城，学术氛围浓厚，生活节奏宜人',
-        'Bonn': '前首都，国际组织云集，生活质量高，莱茵河畔风光秀丽'
-    }
+    institution = re.search(r'(?:university|institute)[\s:]*([\w\s]+)', text, re.IGNORECASE)
+    location = re.search(r'(?:location)[\s:]*([\w\s,]+)', text, re.IGNORECASE)
+    field = re.search(r'(?:research|field)[\s:]*([\w\s,]+)', text, re.IGNORECASE)
 
     highlight_parts = []
     if institution:
-        highlight_parts.append(f"{institution.group(1)}是一所知名学术机构")
+        highlight_parts.append(f"{institution.group(1)} is a renowned academic institution")
     if location:
         city = location.group(1).strip()
-        if city_match:
-            city = city_match.group(1)
-            city_description = city_info.get(city.title(), f"位于{city}")
-            highlight_parts.append(city_description)
-        else:
-            highlight_parts.append(f"位于{city}")
+        highlight_parts.append(f"located in {city}")
     if field:
-        highlight_parts.append(f"在{field.group(1)}领域有突出研究")
+        highlight_parts.append(f"with notable research in {field.group(1)}")
 
     if highlight_parts:
-        return "，".join(highlight_parts) + "。项目提供完善的科研设施、国际化的学术环境和良好的发展机会。"
+        return " ".join(highlight_parts) + ". The position offers excellent research facilities, an international academic environment, and strong development opportunities."
     else:
-        return "提供国际化的学术环境、完善的科研设施和良好的发展前景，是追求学术卓越的理想选择。"
+        return "The position offers an international academic environment, excellent research facilities, and strong development prospects."
 
 def validate_selector(selector):
     """Validate if a CSS selector is syntactically correct"""
@@ -1042,7 +1018,7 @@ def generate_summary_article(jobs):
         
         if not real_title:
             real_title = "PhD Position in Germany"
-        
+            
         article += f"## {real_title}\n\n"
         
         # Extract deadline from content
@@ -1050,7 +1026,7 @@ def generate_summary_article(jobs):
         if deadline_match:
             deadline = deadline_match.group(1).strip()
             article += f"**Application Deadline:** {deadline}\n\n"
-
+            
         if job.get('highlight'):
             article += f"**Highlights:** {job['highlight']}\n\n"
             
@@ -1062,16 +1038,16 @@ def generate_summary_article(jobs):
             
         if job.get('requirements'):
             article += f"**Requirements:** {job['requirements']}\n\n"
-            if job.get('contract'):
-                article += f"**Contract Duration:** {job['contract']}\n\n"
 
-        # Extract and add starting date information
+        if job.get('contract'):
+            article += f"**Contract Duration:** {job['contract']}\n\n"
+            
+        # Add starting date
         start_match = re.search(r'Starting Date\s*\n([^\n]+)', content)
         starting_date = start_match.group(1).strip() if start_match else "Not specified"
-        if starting_date.lower() == "as soon as possible":
-            article += f"**Starting Date:** As soon as possible\n\n"
-        else:
-            article += f"**Starting Date:** {starting_date}\n\n"        # Add job link directly
+        article += f"**Starting Date:** {starting_date}\n\n"
+        
+        # Add job link
         if job.get('link'):
             article += f"**Job link:** {job.get('link')}\n\n"
         

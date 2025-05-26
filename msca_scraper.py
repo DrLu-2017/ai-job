@@ -15,6 +15,38 @@ import json
 # Ensure UTF-8 encoding for standard output
 sys.stdout.reconfigure(encoding='utf-8')
 
+def retry_with_backoff(func, retries=3, initial_delay=1, max_delay=10):
+    """Execute a function with exponential backoff retry logic"""
+    def wrapper(*args, **kwargs):
+        delay = initial_delay
+        last_exception = None
+        
+        for attempt in range(retries):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                last_exception = e
+                print(f"Attempt {attempt + 1}/{retries} failed: {str(e)}")
+                
+                if attempt < retries - 1:
+                    sleep_time = min(delay * (2 ** attempt), max_delay)
+                    print(f"Waiting {sleep_time} seconds before retrying...")
+                    time.sleep(sleep_time)
+                    
+                    # Check if we need to refresh the driver
+                    if isinstance(e, (InvalidSessionIdException, TimeoutException)):
+                        print("Browser session may be invalid, attempting to refresh...")
+                        try:
+                            if 'driver' in kwargs:
+                                kwargs['driver'].refresh()
+                            elif len(args) > 0 and isinstance(args[0], webdriver.Chrome):
+                                args[0].refresh()
+                        except:
+                            print("Failed to refresh browser, continuing with retry...")
+        
+        raise last_exception
+    return wrapper
+
 def set_windows_proxy_from_pac(pac_url):
     """Set Windows system proxy from PAC URL"""
     try:
@@ -26,219 +58,361 @@ def set_windows_proxy_from_pac(pac_url):
     except Exception as e:
         print(f"Failed to set system proxy: {e}")
 
-def fetch_job_detail(driver, url):
-    """Fetch detailed job information from a specific URL"""
-    driver.get(url)
-    time.sleep(2)
-
+@retry_with_backoff
+def fetch_job_detail(driver, url, max_retries=3):
+    """Fetch detailed job information from a specific URL with retry logic"""
     # Initialize variables
     title = content = institution = location = posted = contract = ''
+    content_parts = []
+    metadata = {
+        'contact_email': '',
+        'contact_postal': '',
+        'required_documents': [],
+        'requirements': [],
+        'deadline': '',
+        'research_fields': [],
+        'department': '',
+        'employment_type': '',
+        'funding_program': ''
+    }
 
     try:
-        # Check if it's a EURAXESS page
+        print(f"Fetching job details from {url}...")
+        driver.get(url)
+
+        # Wait for the page to be fully loaded
+        try:
+            WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+            time.sleep(2)  # Additional wait for dynamic content
+        except TimeoutException as e:
+            print(f"Timeout waiting for page load: {str(e)}")
+            raise
+
+        # EURAXESS page handling
         if "euraxess.ec.europa.eu" in url:
-            # Wait for content to load
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.CLASS_NAME, "group-job-basic-info"))
-            )
-            
-            # Get title
             try:
-                title = driver.find_element(By.CLASS_NAME, "job-title").text.strip()
-            except:
+                # Wait for main content and get title
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.CLASS_NAME, "ecl-content-item-block"))
+                )
+                title = WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, ".ecl-page-header__title"))
+                ).text.strip()
+
+                # Extract research fields
                 try:
-                    title = driver.find_element(By.TAG_NAME, "h1").text.strip()
-                except:
-                    pass
-            
-            # Get content
-            try:
-                content_sections = driver.find_elements(By.CLASS_NAME, "field-group")
-                contents = []
-                for section in content_sections:
-                    try:
-                        label = section.find_element(By.CLASS_NAME, "field-label").text.strip()
-                        value = section.find_element(By.CLASS_NAME, "field-items").text.strip()
-                        contents.append(f"{label}:\\n{value}")
-                    except:
-                        continue
-                content = "\\n\\n".join(contents)
-            except:
+                    fields = driver.find_elements(By.CSS_SELECTOR, ".id-Research-Field .ecl-text-standard a")
+                    if fields:
+                        metadata['research_fields'] = [f.text.strip() for f in fields]
+                        content_parts.append("Research Fields: " + ", ".join(metadata['research_fields']))
+                except Exception as e:
+                    print(f"Error getting research fields: {str(e)}")
+
+                # Extract department info
                 try:
-                    content = driver.find_element(By.CLASS_NAME, "group-job-basic-info").text.strip()
-                except:
-                    pass
-            
-            # Get institution
-            try:
-                institution = driver.find_element(By.CLASS_NAME, "organisation-name").text.strip()
-            except:
-                pass
-            
-            # Get location
-            try:
-                location = driver.find_element(By.CLASS_NAME, "country-name").text.strip()
-            except:
-                pass
-            
-            # Get posted date
-            try:
-                posted = driver.find_element(By.CLASS_NAME, "submitted-date").text.strip()
-            except:
-                pass
-            
-            # Get contract information
-            try:
-                contract_elem = driver.find_element(By.XPATH, "//*[contains(text(), 'Type of Contract:')]")
-                contract = contract_elem.find_element(By.XPATH, "..").text.strip()
-            except:
-                pass
-            
+                    dept = driver.find_element(By.CSS_SELECTOR, ".id-Department .ecl-text-standard").text.strip()
+                    if dept:
+                        metadata['department'] = dept
+                        content_parts.append("Department: " + dept)
+                except Exception as e:
+                    print(f"Error getting department: {str(e)}")
+
+                # Extract location info
+                try:
+                    loc = driver.find_element(By.CSS_SELECTOR, ".id-Work-Locations .ecl-text-standard").text.strip()
+                    if loc:
+                        content_parts.append("Work Locations: " + loc)
+                        location = loc
+                except Exception as e:
+                    print(f"Error getting location: {str(e)}")
+
+                # Extract institution
+                try:
+                    institution = driver.find_element(By.CLASS_NAME, "organisation-name").text.strip()
+                except Exception as e:
+                    print(f"Error getting institution: {str(e)}")
+
+                # Extract posting date and deadline
+                try:
+                    posted_items = driver.find_elements(By.CSS_SELECTOR, ".ecl-content-block__primary-meta-item")
+                    for item in posted_items:
+                        if "Posted on:" in item.text:
+                            posted = item.text.replace("Posted on:", "").strip()
+                            break
+
+                    deadline_elem = driver.find_element(By.CSS_SELECTOR, ".id-Application-Deadline time")
+                    if deadline_elem:
+                        deadline = deadline_elem.get_attribute("datetime")
+                        if deadline:
+                            metadata['deadline'] = deadline.split('T')[0]
+                            content_parts.append(f"Application Deadline: {metadata['deadline']}")
+                except Exception as e:
+                    print(f"Error getting posting date/deadline: {str(e)}")
+
+                # Extract contact information
+                try:
+                    contact_sections = driver.find_elements(By.CSS_SELECTOR, ".id-Contact-Information .ecl-text-standard")
+                    for section in contact_sections:
+                        text = section.text.lower()
+                        if '@' in text:  # Look for email
+                            email_match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', text)
+                            if email_match:
+                                metadata['contact_email'] = email_match.group(0)
+                        if any(word in text for word in ['address', 'postal', 'mail to']):  # Look for postal address
+                            metadata['contact_postal'] = section.text.strip()
+                except Exception as e:
+                    print(f"Error extracting contact information: {str(e)}")
+
+                # Extract required documents
+                try:
+                    doc_sections = driver.find_elements(By.CSS_SELECTOR, 
+                        ".id-Required-Documents .ecl-text-standard, .id-How-To-Apply .ecl-text-standard")
+                    for section in doc_sections:
+                        text = section.text.lower()
+                        doc_items = []
+                        if any(doc in text for doc in ['cv', 'curriculum vitae', 'resume']):
+                            doc_items.append('CV/Resume')
+                        if any(doc in text for doc in ['motivation letter', 'cover letter', 'application letter']):
+                            doc_items.append('Motivation Letter')
+                        if any(doc in text for doc in ['degree', 'diploma', 'certificate']):
+                            doc_items.append('Degree Certificates')
+                        if any(doc in text for doc in ['reference', 'recommendation']):
+                            doc_items.append('Reference Letters')
+                        if any(doc in text for doc in ['transcript', 'academic record']):
+                            doc_items.append('Academic Transcripts')
+                        if doc_items:
+                            metadata['required_documents'].extend(doc_items)
+                except Exception as e:
+                    print(f"Error extracting required documents: {str(e)}")
+
+                # Extract employment details
+                try:
+                    contract_elem = driver.find_element(By.XPATH, "//*[contains(text(), 'Type of Contract:')]")
+                    if contract_elem:
+                        contract_text = contract_elem.find_element(By.XPATH, "..").text.strip()
+                        if contract_text:
+                            metadata['employment_type'] = contract_text
+                            contract = contract_text
+                            content_parts.append("Contract Type: " + contract_text)
+                except Exception as e:
+                    print(f"Error getting contract info: {str(e)}")
+
+                # Extract funding information
+                try:
+                    funding_elem = driver.find_element(By.XPATH, "//*[contains(text(), 'Funding Programme:')]")
+                    if funding_elem:
+                        funding_text = funding_elem.find_element(By.XPATH, "..").text.strip()
+                        if funding_text:
+                            metadata['funding_program'] = funding_text.replace('Funding Programme:', '').strip()
+                            content_parts.append("Funding Programme: " + metadata['funding_program'])
+                except Exception as e:
+                    print(f"Error getting funding info: {str(e)}")
+
+            except Exception as e:
+                print(f"Error processing EURAXESS page: {str(e)}")
+                # Fallback to searching for basic elements
+                try:
+                    if not title:
+                        title = driver.find_element(By.TAG_NAME, "h1").text.strip()
+                    if not content:
+                        content = driver.find_element(By.TAG_NAME, "article").text.strip()
+                except Exception as e:
+                    print(f"Error in fallback content extraction: {str(e)}")
+
         else:
-            # Original MSCA selectors
-            # Try multiple title selectors
+            # Non-EURAXESS page handling
+            print("Processing non-EURAXESS page...")
+            
+            # Extract title
             title_selectors = [
-                "h1.job-title",
-                "h1.title",
-                ".position-title",
-                "#page-title",
-                "h1"
+                "h1.job-title", "h1.title", ".position-title", 
+                "#page-title", "h1"
             ]
             for selector in title_selectors:
                 try:
-                    title = driver.find_element(By.CSS_SELECTOR, selector).text.strip()
-                    if title:
-                        break
-                except:
+                    title_elem = driver.find_element(By.CSS_SELECTOR, selector)
+                    if title_elem and title_elem.is_displayed():
+                        title = title_elem.text.strip()
+                        if title:
+                            break
+                except Exception:
                     continue
 
-            # Try multiple content selectors
+            # Extract content
             content_selectors = [
-                ".job-description",
-                ".field--name-body",
-                ".description",
-                "article",
-                "main",
-                ".content"
+                ".job-description", ".field--name-body", ".description",
+                "article", "main", ".content"
             ]
             for selector in content_selectors:
                 try:
-                    content = driver.find_element(By.CSS_SELECTOR, selector).text.strip()
-                    if content:
-                        break
-                except:
+                    content_elem = driver.find_element(By.CSS_SELECTOR, selector)
+                    if content_elem and content_elem.is_displayed():
+                        content = content_elem.text.strip()
+                        if content:
+                            break
+                except Exception:
                     continue
 
+            # If still no content, try fallback sections
             if not content:
-                # Fallback: get all text from specific sections
                 try:
                     sections = driver.find_elements(By.CSS_SELECTOR, ".field--type-text-with-summary, .field--type-text-long")
-                    content = "\n\n".join([section.text.strip() for section in sections])
-                except:
-                    # Last resort: get body text
-                    content = driver.find_element(By.TAG_NAME, "body").text.strip()
+                    if sections:
+                        content = "\n\n".join([section.text.strip() for section in sections])
+                except Exception:
+                    try:
+                        content = driver.find_element(By.TAG_NAME, "body").text.strip()
+                    except Exception as e:
+                        print(f"Error getting fallback content: {str(e)}")
 
-            # Institution name
-            institution_selectors = [
-                ".field--name-field-institution",
-                ".institution-name",
-                ".organization",
-                "[class*='institution']",
-                "[class*='organization']"
-            ]
-            for selector in institution_selectors:
-                try:
-                    institution = driver.find_element(By.CSS_SELECTOR, selector).text.strip()
-                    if institution:
-                        break
-                except:
-                    continue
+            # Process content for metadata if found
+            if content:
+                # Extract contact information from content
+                email_matches = re.findall(r'[\w\.-]+@[\w\.-]+\.\w+', content)
+                if email_matches:
+                    metadata['contact_email'] = email_matches[0]  # Take first email found
 
-            # Location information
-            location_selectors = [
-                ".field--name-field-location",
-                ".location-info",
-                ".country",
-                "[class*='location']",
-                "[class*='country']"
-            ]
-            for selector in location_selectors:
-                try:
-                    location = driver.find_element(By.CSS_SELECTOR, selector).text.strip()
-                    if location:
-                        break
-                except:
-                    continue
-
-            # Posted date
-            posting_date_selectors = [
-                ".field--name-field-posting-date",
-                ".date-posted",
-                ".post-date",
-                "[class*='date']"
-            ]
-            for selector in posting_date_selectors:
-                try:
-                    posted = driver.find_element(By.CSS_SELECTOR, selector).text.strip()
-                    if posted:
-                        break
-                except:
-                    continue
-
-            # Contract duration
-            contract_selectors = [
-                ".field--name-field-duration",
-                ".contract-duration",
-                ".period",
-                "[class*='duration']"
-            ]
-            for selector in contract_selectors:
-                try:
-                    contract = driver.find_element(By.CSS_SELECTOR, selector).text.strip()
-                    if contract:
-                        break
-                except:
-                    continue
-
-            # If contract duration not found in specific fields, try to find it in the content
-            if not contract:
-                duration_patterns = [
-                    r'duration[:：]\s*([\w\s\-]+)',
-                    r'contract period[:：]\s*([\w\s\-]+)',
-                    r'period[:：]\s*([\w\s\-]+)',
-                    r'contract[:：]\s*([\w\s\-]+\s+(?:month|year|months|years))',
-                    r'(\d+\s+(?:month|year|months|years))',
-                    r'((?:fixed[- ]term|temporary)[^.]*(?:\d+\s+(?:month|year|months|years)))'
+                # Look for postal address
+                address_patterns = [
+                    r'(?:postal address|mailing address|send to)[:]\s*([^\.]+\.\s*\d{4,}[^\.]+\.)',
+                    r'(?:address|send applications to)[:]\s*([^\.]+\d{4,}[^\.]+\.)'
                 ]
-                
-                for pattern in duration_patterns:
+                for pattern in address_patterns:
                     match = re.search(pattern, content, re.IGNORECASE)
                     if match:
-                        contract = match.group(1).strip()
+                        metadata['contact_postal'] = match.group(1).strip()
                         break
 
+                # Extract application deadline from content
+                deadline_patterns = [
+                    r'(?:closing date|deadline|apply before|submit before)[:]\s*(\d{1,2}(?:st|nd|rd|th)?\s+\w+\s+\d{4})',
+                    r'(?:closing date|deadline|apply before|submit before)[:]\s*(\d{4}-\d{2}-\d{2})',
+                    r'(?:applications? due)[:]\s*(\d{1,2}(?:st|nd|rd|th)?\s+\w+\s+\d{4})'
+                ]
+                for pattern in deadline_patterns:
+                    match = re.search(pattern, content, re.IGNORECASE)
+                    if match:
+                        metadata['deadline'] = match.group(1)
+                        break
+
+                # Extract required documents
+                doc_patterns = [
+                    (r'(?:cv|curriculum vitae|resume)', 'CV/Resume'),
+                    (r'(?:motivation|cover) letter', 'Motivation Letter'),
+                    (r'(?:degree|diploma) certificate', 'Degree Certificates'),
+                    (r'reference letter', 'Reference Letters'),
+                    (r'transcript', 'Academic Transcripts'),
+                    (r'research (proposal|statement)', 'Research Proposal'),
+                    (r'language certificate', 'Language Certificate')
+                ]
+                for pattern, doc_type in doc_patterns:
+                    if re.search(pattern, content, re.IGNORECASE):
+                        metadata['required_documents'].append(doc_type)
+
+                # Extract requirements
+                req_section = None
+                req_patterns = [
+                    r'(?:requirements|qualifications|we expect)[:]\s*(.+?)(?=\n\n|\Z)',
+                    r'(?:candidate|applicant) should[:]\s*(.+?)(?=\n\n|\Z)',
+                    r'(?:profile|prerequisites)[:]\s*(.+?)(?=\n\n|\Z)'
+                ]
+                for pattern in req_patterns:
+                    match = re.search(pattern, content, re.IGNORECASE | re.DOTALL)
+                    if match:
+                        req_section = match.group(1)
+                        break
+
+                if req_section:
+                    # Split requirements into bullet points
+                    requirements = re.split(r'[•\-\*]\s*|\d+\.\s+', req_section)
+                    requirements = [r.strip() for r in requirements if r.strip()]
+                    metadata['requirements'] = requirements
+
+                # Extract employment type/contract info if not already found
+                if not contract:
+                    contract_patterns = [
+                        r'(?:contract type|employment type|position type)[:]\s*([^\.]+)',
+                        r'(?:duration|period)[:]\s*((?:\d+|one|two|three|four)\s+(?:year|month)s?)',
+                        r'(?:fixed[- ]term|temporary) contract for (\d+\s+(?:year|month)s?)',
+                    ]
+                    for pattern in contract_patterns:
+                        match = re.search(pattern, content, re.IGNORECASE)
+                        if match:
+                            contract = match.group(1).strip()
+                            metadata['employment_type'] = contract
+                            break
+
+            # Extract metadata (institution, location, etc.)
+            try:
+                for selector in [".institution-name", "[class*='institution']"]:
+                    try:
+                        institution = driver.find_element(By.CSS_SELECTOR, selector).text.strip()
+                        if institution:
+                            break
+                    except Exception:
+                        continue
+
+                for selector in [".location-name", "[class*='location']"]:
+                    try:
+                        location = driver.find_element(By.CSS_SELECTOR, selector).text.strip()
+                        if location:
+                            break
+                    except Exception:
+                        continue
+
+            except Exception as e:
+                print(f"Error extracting metadata: {str(e)}")
+
     except Exception as e:
-        print(f"Error fetching job details: {e}")
+        print(f"Error fetching job details: {str(e)}")
+        if not title:
+            title = "Position Details"
+        if not content:
+            content = "Job details not available. Please check the original posting."
+        raise
 
-    # Clean up the data
-    title = title.replace('\n', ' ').strip()
-    institution = institution.replace('\n', ' ').strip()
-    location = location.replace('\n', ' ').strip()
-    posted = posted.replace('\n', ' ').strip()
-    contract = contract.replace('\n', ' ').strip()
+    finally:
+        # Add metadata to content parts
+        if metadata['contact_email']:
+            content_parts.append(f"Contact Email: {metadata['contact_email']}")
+        if metadata['contact_postal']:
+            content_parts.append(f"Contact Address: {metadata['contact_postal']}")
+        if metadata['required_documents']:
+            content_parts.append("Required Documents:\n• " + "\n• ".join(metadata['required_documents']))
+        if metadata['requirements']:
+            content_parts.append("Requirements:\n• " + "\n• ".join(metadata['requirements']))
+        if metadata['deadline']:
+            content_parts.append(f"Application Deadline: {metadata['deadline']}")
 
-    return title, content, institution, location, posted, contract
+        # Combine content parts if available, otherwise use existing content
+        if content_parts:
+            content = "\n\n".join(content_parts)
+            if not any(metadata['deadline'] in p for p in content_parts):
+                posted = f"{posted} (Deadline: {metadata['deadline']})" if metadata['deadline'] else posted
+        
+        # Clean up any None values
+        title = title or "Position Details"
+        content = content or "Job details not available. Please check the original posting."
+        institution = institution or ""
+        location = location or ""
+        posted = posted or ""
+        contract = contract or ""
+        
+        print(f"Successfully extracted job details from {url}")
+        print(f"Found {len(metadata['required_documents'])} required documents")
+        print(f"Found {len(metadata['requirements'])} requirements")
+        if metadata['contact_email'] or metadata['contact_postal']:
+            print("Successfully extracted contact information")
+        
+        return title, content, institution, location, posted, contract
 
-def fetch_msca_jobs(use_headless=True, selected_model=None):
-    """Fetch job postings from MSCA and EURAXESS websites"""
+def fetch_msca_jobs(use_headless=True, selected_model=None, max_retries=3):
+    """Fetch job postings from MSCA and EURAXESS websites with improved error handling"""
     set_windows_proxy_from_pac("http://127.0.0.1:55624/proxy.pac")
-    
-    # Update base URLs with correct format
+    # Update base URLs with correct format, including hosting offers    
     job_urls = {
-        'PhD': 'https://euraxess.ec.europa.eu/jobs/search/field_research_profile/first-stage-researcher-r1-446',
-        'Postdoc': 'https://euraxess.ec.europa.eu/jobs/search/field_research_profile/recognised-researcher-r2-446',
-        'Senior': 'https://euraxess.ec.europa.eu/jobs/search/field_research_profile/established-researcher-r3-446'
-    }    # Set up Chrome options
+        'Jobs': 'https://euraxess.ec.europa.eu/jobs/search?f%5B0%5D=offer_type%3Ajob_offer'
+    }  # Set up Chrome options
     options = webdriver.ChromeOptions()
     # Basic settings
     options.add_argument('--no-sandbox')
@@ -319,49 +493,82 @@ def fetch_msca_jobs(use_headless=True, selected_model=None):
 
     # Set page load timeout
     driver.set_page_load_timeout(30)
-    all_jobs = []
-
-    # Process each section
+    all_jobs = []    # Process each section
     for section_type, section_url in job_urls.items():
         print(f"\nProcessing {section_type} section: {section_url}")
-        try:
-            driver.get(section_url)
-            time.sleep(5)  # Wait for page to load
+        retry_count = 0
+        while retry_count < max_retries:
+            try:
+                driver.get(section_url)
+                time.sleep(5)  # Wait for page to load
 
-            # Try to find job listings
-            found_jobs = fetch_euraxess_jobs(driver, section_type)
-            if found_jobs:
-                all_jobs.extend(found_jobs)
-                print(f"Found {len(found_jobs)} {section_type} positions")
-
-        except Exception as e:
-            print(f"Error processing {section_type} section: {e}")
+                # Try to find job listings
+                found_jobs = fetch_euraxess_jobs(driver, section_type)
+                if found_jobs:
+                    all_jobs.extend(found_jobs)
+                    print(f"Found {len(found_jobs)} {section_type} positions")
+                    break
+                else:
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        print(f"No jobs found, retrying ({retry_count + 1}/{max_retries})...")
+                        time.sleep(3)
+                        continue
+            except Exception as e:
+                print(f"Error processing {section_type} section (attempt {retry_count + 1}/{max_retries}): {e}")
+                retry_count += 1
+                if retry_count < max_retries:
+                    time.sleep(3)
+                    continue
+                break
 
     # Fetch detailed information for each job
     job_details = []
     print("\nFetching job details...")
     for i, job in enumerate(all_jobs):
         print(f"Processing job {i+1}/{len(all_jobs)} ({int((i+1)/len(all_jobs)*100)}%): {job['title'][:30]}...")
-        try:
-            detail_title, detail_content, inst2, loc2, posted, contract = fetch_job_detail(driver, job['link'])
-        except InvalidSessionIdException:
-            print("Browser session invalid, restarting...")
+        retry_count = 0
+        success = False
+        detail_data = None
+        
+        while retry_count < max_retries and not success:
             try:
-                driver.quit()
-            except Exception as e:
-                print(f"Error while quitting the driver: {e}")
+                if retry_count > 0:
+                    print(f"Retrying job details fetch (attempt {retry_count + 1}/{max_retries})...")
+                    # Reinitialize driver if needed
+                    try:
+                        driver.quit()
+                    except:
+                        pass
+                    try:
+                        driver = webdriver.Chrome(options=options)
+                        driver.set_page_load_timeout(30)
+                    except Exception as e:
+                        print(f"Error reinitializing driver: {e}")
+                        time.sleep(2)  # Wait before retry
+                        continue
 
-            # Reinitialize driver
-            try:
-                driver = webdriver.Chrome(options=options)
-                driver.set_page_load_timeout(30)
-                detail_title, detail_content, inst2, loc2, posted, contract = fetch_job_detail(driver, job['link'])
-            except Exception as e:
-                print(f"Error reinitializing driver or fetching job details: {e}")
-        except Exception as e:
-            print(f"Error fetching job details for {job['title']}: {e}")
+                detail_title, detail_content, inst2, loc2, posted, contract = fetch_job_detail(driver, job['link'], max_retries=3)
+                detail_data = (detail_title, detail_content, inst2, loc2, posted, contract)
+                success = True
 
-        # Use detail page data if available
+            except InvalidSessionIdException:
+                print(f"Browser session invalid on attempt {retry_count + 1}")
+                retry_count += 1
+                if retry_count == max_retries:
+                    print("Max retries reached for this job, setting empty values")
+                    detail_title = detail_content = inst2 = loc2 = posted = contract = ''
+                time.sleep(2)  # Wait before retry
+                
+            except Exception as e:
+                print(f"Error fetching job details on attempt {retry_count + 1}: {e}")
+                retry_count += 1
+                if retry_count == max_retries:
+                    print("Max retries reached for this job, setting empty values")
+                    detail_title = detail_content = inst2 = loc2 = posted = contract = ''
+                time.sleep(2)  # Wait before retry
+
+        # Use detail page data if available, fall back to list page data if needed
         institution = inst2 or job.get('institution', '')
         location = loc2 or job.get('location', '')
 
@@ -375,9 +582,13 @@ def fetch_msca_jobs(use_headless=True, selected_model=None):
             "contract": contract,
             "type": job['type']  # Keep track of whether it's PhD or Postdoc
         })
-        print(f"Job {i+1}/{len(all_jobs)} processed")
+        print(f"Successfully processed job {i+1}/{len(all_jobs)}")
 
-    driver.quit()
+    try:
+        driver.quit()
+    except:
+        pass
+    
     return job_details
 
 def classify_position(title, content):
@@ -424,11 +635,10 @@ def generate_summary_article(job_details, today=None):
     for job in job_details:
         category = classify_position(job['title'], job['content'])
         area = extract_research_area(job['title'] + ' ' + job['content'])
-        classified[category][area].append(job)
-    
-    article = f"# MSCA Research Positions Summary ({today})\n\n"
+        classified[category][area].append(job)        
+        article = f"# Latest MSCA Research Positions ({today})\n\n"
     article += "## About MSCA\n"
-    article += "Marie Skłodowska-Curie Actions (MSCA) is the European Union's flagship funding programme for doctoral education and postdoctoral training. It offers various opportunities for researchers at different career stages.\n\n"
+    article += "Marie Skłodowska-Curie Actions (MSCA) is the European Union's flagship funding programme for doctoral education and postdoctoral training. This summary contains the 10 most recent job postings.\n\n"
     
     categories = ['PhD Position', 'Postdoctoral Position', 'Academic Position', 'Research Position', 'Technical Position', 'Other Position']
     
@@ -575,19 +785,100 @@ def fetch_jobs_with_js_and_network(driver, section_url):
         except:
             pass
 
+@retry_with_backoff
 def fetch_euraxess_jobs(driver, section_type):
     """Fetch job listings from EURAXESS website."""
     found_jobs = []   
     try:
-        print(f"Waiting for page to load...")
+        print(f"Waiting for page to load and validate...")
+        
+        # Wait for job cards to be visible
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, ".ecl-content-item__content-block"))
+        )
+        
+        # Get all job cards
+        job_cards = driver.find_elements(By.CSS_SELECTOR, ".ecl-content-item__content-block")
+        # Take only the last 10 jobs
+        job_cards = job_cards[-10:] if len(job_cards) > 10 else job_cards
+        print(f"Processing last {len(job_cards)} job cards...")
+        
+        for card in job_cards:
+            try:
+                # Get title and link
+                title_elem = card.find_element(By.CSS_SELECTOR, ".ecl-content-block__title a")
+                title = title_elem.text.strip()
+                link = title_elem.get_attribute("href")
+                
+                # Get institution
+                try:
+                    institution_elem = card.find_element(By.CSS_SELECTOR, ".ecl-content-block__primary-meta-item a")
+                    institution = institution_elem.text.strip()
+                except:
+                    institution = ""
+                
+                # Get posted date
+                try:
+                    date_elem = card.find_elements(By.CSS_SELECTOR, ".ecl-content-block__primary-meta-item")[1]
+                    posted = date_elem.text.replace("Posted on:", "").strip()
+                except:
+                    posted = ""
+                
+                # Get description preview
+                try:
+                    desc = card.find_element(By.CSS_SELECTOR, ".ecl-content-block__description").text.strip()
+                except:
+                    desc = ""
+                
+                # Get metadata
+                metadata = {}
+                meta_items = card.find_elements(By.CSS_SELECTOR, ".ecl-content-block__secondary-meta-item")
+                for item in meta_items:
+                    try:
+                        item_text = item.text.strip()
+                        if "Department:" in item_text:
+                            metadata['department'] = item_text.split("Department:")[1].strip()
+                        elif "Work Locations:" in item_text:
+                            metadata['location'] = item_text.split("Work Locations:")[1].strip()
+                        elif "Research Field:" in item_text:
+                            fields = item.find_elements(By.CSS_SELECTOR, "a")
+                            metadata['fields'] = [f.text.strip() for f in fields]
+                        elif "Researcher Profile:" in item_text:
+                            profiles = item.find_elements(By.CSS_SELECTOR, "a")
+                            metadata['profiles'] = [p.text.strip() for p in profiles]
+                    except:
+                        continue
+                
+                job_data = {
+                    "title": title,
+                    "link": link,
+                    "institution": institution,
+                    "posted": posted,
+                    "description": desc,
+                    "location": metadata.get('location', ''),
+                    "department": metadata.get('department', ''),
+                    "research_fields": metadata.get('fields', []),
+                    "researcher_profiles": metadata.get('profiles', []),
+                    "type": section_type
+                }
+                
+                found_jobs.append(job_data)
+                print(f"Added job: {title[:50]}...")
+            except:
+                pass
+        if not validate_page_load(driver):
+            raise Exception("Page failed to load properly")
+            
         # Try multiple selectors to wait for page load
         primary_selectors = [
+            ".view-content",  # EURAXESS main content container
             ".ecl-content-item-block",
-            ".ecl-card",
-            ".feed-item",
-            ".view-content",
+            ".ecl-content-block",
+            ".ecl-content-item__content-block",
+            ".search-result-wrapper",
+            ".listing-results-wrapper",
             ".search-results",
-            ".jobs-list"
+            "article"  # Fallback for any article elements
         ]
         
         found_element = False
@@ -604,23 +895,39 @@ def fetch_euraxess_jobs(driver, section_type):
                 continue
         
         if not found_element:
-            print("Primary selectors not found, trying secondary approach...")
-            # Wait for any job-related links as fallback            def find_job_links(driver):
-                links = driver.find_elements(By.TAG_NAME, "a")
-                job_links = []
-                for link in links:
-                    try:
-                        href = link.get_attribute("href") or ""
-                        text = link.text.strip().lower()
-                        if href and text and any(kw in (href.lower() + " " + text) 
-                                               for kw in ["job", "position", "vacancy", "fellow", "researcher"]):
-                            job_links.append(link)
-                    except:
-                        continue
-                return len(job_links) > 0
-            
-            WebDriverWait(driver, 15).until(find_job_links)
-            print("Found job-related links")
+            print("Primary selectors not found, trying secondary approach...")            # Wait for any job-related links as fallback
+            def find_job_links(driver):
+                try:
+                    # First try EURAXESS specific links
+                    links = driver.find_elements(By.CSS_SELECTOR, ".ecl-content-block__title a, [class*='job-title'] a")
+                    if links:
+                        return True
+                    
+                    # Fall back to searching all links
+                    links = driver.find_elements(By.TAG_NAME, "a")
+                    job_links = []
+                    for link in links:
+                        try:
+                            href = link.get_attribute("href") or ""
+                            text = link.text.strip()
+                            # More specific keywords for EURAXESS
+                            if href and text and any(kw in (href.lower() + " " + text.lower())
+                                                   for kw in ["job-details", "phd", "researcher", "position", 
+                                                            "research", "fellowship", "vacancy", "hosting"]):
+                                job_links.append(link)
+                        except:
+                            continue
+                    return bool(job_links)  # Convert to boolean explicitly
+                except Exception as e:
+                    print(f"Error in find_job_links: {e}")
+                    return False
+
+            try:
+                WebDriverWait(driver, 15).until(find_job_links)
+                print("Found job-related links")
+            except TimeoutException:
+                print("No job-related links found within timeout")
+                pass
         
         # Let the page fully render
         time.sleep(5)
@@ -878,25 +1185,111 @@ def fetch_euraxess_jobs(driver, section_type):
     
     return found_jobs
 
+def validate_page_load(driver, timeout=10):
+    """Validate that a page has fully loaded with dynamic content"""
+    try:
+        # Wait for basic HTML load
+        WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
+        )
+        
+        # Wait for page readyState
+        WebDriverWait(driver, timeout).until(
+            lambda d: d.execute_script("return document.readyState") == "complete"
+        )
+        
+        # Wait for dynamic content
+        WebDriverWait(driver, timeout).until(
+            lambda d: d.execute_script("""
+                return !document.querySelector('[class*="loading"]') && 
+                       !document.querySelector('[class*="spinner"]') &&
+                       !document.querySelector('[aria-busy="true"]')
+            """)
+        )
+        
+        # Check for common error indicators
+        error_indicators = driver.execute_script("""
+            return {
+                'status': !document.querySelector('.error-page, .error-message, [class*="error"]'),
+                'http': !document.title.includes('404') && !document.title.includes('500'),
+                'content': document.body.textContent.length > 100
+            }
+        """)
+        
+        if not all(error_indicators.values()):
+            raise Exception("Page appears to have errors or invalid content")
+            
+        return True
+        
+    except Exception as e:
+        print(f"Page load validation failed: {str(e)}")
+        return False
+
+def retry_with_backoff(func, retries=3, initial_delay=1, max_delay=10):
+    """Execute a function with exponential backoff retry logic"""
+    def wrapper(*args, **kwargs):
+        delay = initial_delay
+        last_exception = None
+        
+        for attempt in range(retries):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                last_exception = e
+                print(f"Attempt {attempt + 1}/{retries} failed: {str(e)}")
+                
+                if attempt < retries - 1:
+                    sleep_time = min(delay * (2 ** attempt), max_delay)
+                    print(f"Waiting {sleep_time} seconds before retrying...")
+                    time.sleep(sleep_time)
+                    
+                    # Check if we need to refresh the driver
+                    if isinstance(e, (InvalidSessionIdException, TimeoutException)):
+                        print("Browser session may be invalid, attempting to refresh...")
+                        try:
+                            if 'driver' in kwargs:
+                                kwargs['driver'].refresh()
+                            elif len(args) > 0 and isinstance(args[0], webdriver.Chrome):
+                                args[0].refresh()
+                        except:
+                            print("Failed to refresh browser, continuing with retry...")
+        
+        raise last_exception
+    return wrapper
+
 if __name__ == "__main__":
     print("=== MSCA Research Positions Scraper ===")
     
     print("\n=== Phase 1: Fetching Job Listings ===")
     
-    # Try headless mode first
-    print("Attempting to fetch with headless mode...")
+    max_attempts = 3
+    attempt = 0
     job_details = []
-    try:
-        job_details = fetch_msca_jobs(use_headless=True)
-    except Exception as e:
-        print(f"Headless mode failed: {e}")
     
-    # If headless mode failed, try with visible browser
-    if len(job_details) == 0:
-        print("\nHeadless mode failed to get jobs, trying with visible browser...")
-        job_details = fetch_msca_jobs(use_headless=False)
-    
-    print(f"Successfully retrieved {len(job_details)} job listings")
+    while attempt < max_attempts and len(job_details) == 0:
+        attempt += 1
+        try:
+            # Try headless mode first
+            if attempt == 1:
+                print("Attempting to fetch with headless mode...")
+                job_details = fetch_msca_jobs(use_headless=True)
+            else:
+                print(f"\nAttempt {attempt}: Trying with visible browser...")
+                job_details = fetch_msca_jobs(use_headless=False)
+                
+        except Exception as e:
+            print(f"Attempt {attempt} failed: {str(e)}")
+            if attempt < max_attempts:
+                print("Waiting 10 seconds before next attempt...")
+                time.sleep(10)
+            continue
+            
+        if len(job_details) > 0:
+            print(f"Successfully retrieved {len(job_details)} job listings")
+            break
+        elif attempt < max_attempts:
+            print("No jobs found, will retry with different configuration...")
+            time.sleep(5)
     
     # Exit if no jobs found
     if len(job_details) == 0:
