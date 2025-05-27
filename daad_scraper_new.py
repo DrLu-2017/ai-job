@@ -259,10 +259,31 @@ def fetch_job_detail(driver, url, model="deepseek-r1:70b"):
             match = re.search(pattern, content, re.IGNORECASE)
             if match:
                 info['contract'] = match.group(1)
-                break        # Generate AI highlights for the position using the selected model
+                break
+
+        # Translate relevant fields to Chinese
+        fields_to_translate = ['title', 'institution', 'location', 'requirements', 'contract']
+        print(f"Translating fields for URL: {url} using model: {model}")
+        for field_key in fields_to_translate:
+            if info[field_key]: # Check if the field has content
+                original_text = info[field_key]
+                # 'model' is the selected_model passed to fetch_job_detail
+                translated_text = translate_german_to_chinese(original_text, model) 
+                info[field_key] = translated_text
+                # Limit print length to avoid overly long log lines
+                original_snippet = original_text.strip().replace('\n', ' ')[:50]
+                translated_snippet = translated_text.strip().replace('\n', ' ')[:50]
+                print(f"Translated {field_key}: '{original_snippet}...' to '{translated_snippet}...'")
+            else:
+                print(f"Skipping translation for empty field: {field_key}")
+
+        # Generate AI highlights for the position using the selected model
         print("Generating AI highlights...")
+        # info['title'] is now translated. info['content'] remains original.
+        # ollama_highlight's prompt has its own instruction to translate German parts if found.
+        text_for_highlight = info['title'] + '\n' + info['content']
         try:
-            highlight = ollama_highlight(info['title'] + '\n' + info['content'], model=model or "deepseek-r1:70b")
+            highlight = ollama_highlight(text_for_highlight, model=model or "deepseek-r1:70b")
             info['highlight'] = highlight
             print("Successfully added AI highlights")
         except Exception as e:
@@ -1018,64 +1039,74 @@ def find_element_with_retry(driver, by, selector, max_retries=3, timeout=10):
             print(f"Timeout, retrying... ({attempt + 1}/{max_retries})")
             time.sleep(1)
 
-def generate_summary_article(jobs):
-    """Generate a markdown summary article from job data"""
+def generate_summary_article(jobs, selected_model_name):
+    """Generate a markdown summary article from job data with Chinese labels and translated snippets."""
     if not jobs:
-        return "No positions found."
+        return "未找到职位信息。" # "No positions found."
         
-    article = "# DAAD PhD Position Opportunities\n\n"
-    article += f"*Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n\n"
+    article = "# DAAD博士职位机会\n\n" # "# DAAD PhD Position Opportunities"
+    article += f"*更新于: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n\n" # "*Last updated: ..."
     
     for job in jobs:
-        # Extract real title from content
-        content = job.get('content', '')
-        lines = content.split('\n')
+        content = job.get('content', '') # Raw content for extracting non-translated fields
         
-        # Find first non-empty line after "Back to Overview" that's not "Next"
-        real_title = ""
-        found_overview = False
-        for line in lines:
-            if "Back to Overview" in line:
-                found_overview = True
-                continue
-            if found_overview and line.strip() and line.strip() != "Next":
-                real_title = line.strip()
-                break
+        # Title (already translated in fetch_job_detail)
+        job_title = job.get('title') if job.get('title') else "德国博士职位" # "PhD Position in Germany"
+        article += f"## {job_title}\n\n"
         
-        if not real_title:
-            real_title = "PhD Position in Germany"
-        
-        article += f"## {real_title}\n\n"
-        
-        # Extract deadline from content
+        # Deadline (extract from raw content and translate)
+        deadline_text = "未指定" # "Not specified"
         deadline_match = re.search(r'Application Deadline\s*\n([^\n]+)', content)
         if deadline_match:
-            deadline = deadline_match.group(1).strip()
-            article += f"**Application Deadline:** {deadline}\n\n"
+            extracted_deadline_text = deadline_match.group(1).strip()
+            if extracted_deadline_text:
+                # Check if it's already a common non-translatable phrase or a date
+                if not re.match(r"^\d{4}-\d{2}-\d{2}$", extracted_deadline_text.lower()) and \
+                   extracted_deadline_text.lower() not in ["not specified", "n/a", "none"]:
+                    deadline_text = translate_german_to_chinese(extracted_deadline_text, selected_model_name)
+                else:
+                    deadline_text = extracted_deadline_text # Use as is if it's a date or common placeholder
+        article += f"**截止日期:** {deadline_text}\n\n" # "**Application Deadline:**"
 
+        # Highlights (already AI-processed, likely in Chinese or translated by ollama_highlight's prompt)
         if job.get('highlight'):
-            article += f"**Highlights:** {job['highlight']}\n\n"
+            article += f"**职位亮点:** {job['highlight']}\n\n" # "**Highlights:**"
             
+        # Institution (already translated in fetch_job_detail)
         if job.get('institution'):
-            article += f"**Institution:** {job['institution']}\n\n"
+            article += f"**机构:** {job['institution']}\n\n" # "**Institution:**"
             
+        # Location (already translated in fetch_job_detail)
         if job.get('location'):
-            article += f"**Location:** {job['location']}\n\n"
+            article += f"**地点:** {job['location']}\n\n" # "**Location:**"
             
+        # Requirements (already translated in fetch_job_detail)
         if job.get('requirements'):
-            article += f"**Requirements:** {job['requirements']}\n\n"
-            if job.get('contract'):
-                article += f"**Contract Duration:** {job['contract']}\n\n"
+            article += f"**要求:** {job['requirements']}\n\n" # "**Requirements:**"
+        
+        # Contract Duration (already translated in fetch_job_detail)
+        if job.get('contract'):
+            article += f"**合同期限:** {job['contract']}\n\n" # "**Contract Duration:**"
 
-        # Extract and add starting date information
+        # Starting Date (extract from raw content and translate)
+        starting_date_display = "未指定" # "Not specified"
         start_match = re.search(r'Starting Date\s*\n([^\n]+)', content)
-        starting_date = start_match.group(1).strip() if start_match else "Not specified"
-        if starting_date.lower() == "as soon as possible":
-            article += f"**Starting Date:** As soon as possible\n\n"
-        else:
-            article += f"**Starting Date:** {starting_date}\n\n"        # Add job link directly
+        if start_match:
+            extracted_starting_date_text = start_match.group(1).strip()
+            if extracted_starting_date_text and extracted_starting_date_text.lower() != "not specified":
+                if extracted_starting_date_text.lower() in ["as soon as possible", "sofort", "asap"]:
+                    starting_date_display = "尽快" # "As soon as possible"
+                # Check if it's already a common non-translatable phrase or a date
+                elif not re.match(r"^\d{4}-\d{2}-\d{2}$", extracted_starting_date_text.lower()) and \
+                     extracted_starting_date_text.lower() not in ["n/a", "none"]:
+                    starting_date_display = translate_german_to_chinese(extracted_starting_date_text, selected_model_name)
+                else:
+                    starting_date_display = extracted_starting_date_text # Use as is
+        article += f"**开始日期:** {starting_date_display}\n\n" # "**Starting Date:**"
+        
+        # Job Link (no translation needed for URL itself)
         if job.get('link'):
-            article += f"**Job link:** {job.get('link')}\n\n"
+            article += f"**职位链接:** {job.get('link')}\n\n" # "**Job link:**"
         
         article += "---\n\n"
     
@@ -1083,6 +1114,63 @@ def generate_summary_article(jobs):
 
 # Initialize default server URL for AI processing
 default_server_url = None
+
+
+def translate_german_to_chinese(text_to_translate, model_name, ollama_host="http://rf-calcul:11434"):
+    if not text_to_translate or not isinstance(text_to_translate, str):
+        return text_to_translate # Return if empty or not a string
+
+    # Basic check for non-Chinese characters, assuming German text will have them.
+    # This is a heuristic; more robust language detection is complex.
+    if not re.search(r'[a-zA-ZäöüÄÖÜß]', text_to_translate):
+        print(f"Skipping translation for: {text_to_translate[:50]}... (already Chinese or non-translatable)")
+        return text_to_translate # Assume already Chinese or non-translatable
+
+    prompt = f"Translate the following German text to Chinese. Output only the translated Chinese text and nothing else:\n\n{text_to_translate}"
+    
+    payload = {
+        "model": model_name,
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature": 0.2 # Lower temperature for more deterministic translation
+        }
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+
+    try:
+        print(f"Translating text to Chinese using model {model_name} on {ollama_host}...")
+        api_url = f"{ollama_host}/api/generate"
+        resp = requests.post(api_url, json=payload, headers=headers, timeout=300)
+        resp.raise_for_status()
+        result = resp.json()
+        translated_text = result.get("response", "").strip()
+        
+        # Further clean-up if AI adds prefixes like "Chinese translation:" or "翻译："
+        translated_text = re.sub(r"^(Chinese translation:|翻译：|以下是中文翻译：)\s*", "", translated_text, flags=re.IGNORECASE)
+        # Remove any potential "German text:" or similar introductions if the AI includes the original
+        translated_text = re.sub(r"^(German text:|Original text:|Original:|Ursprünglicher Text:)\s*.*?\n+", "", translated_text, flags=re.IGNORECASE | re.DOTALL)
+        translated_text = translated_text.strip()
+
+        if translated_text:
+            print(f"Original: {text_to_translate[:50]}... Translated: {translated_text[:50]}...")
+            return translated_text
+        else:
+            print(f"Translation resulted in empty string for: {text_to_translate[:50]}... Returning original.")
+            return text_to_translate
+    except requests.exceptions.Timeout:
+        print(f"Error during translation: Timeout after 300 seconds for {ollama_host}")
+        return text_to_translate
+    except requests.exceptions.RequestException as e:
+        print(f"Error during translation: RequestException {e} for {ollama_host}")
+        return text_to_translate
+    except Exception as e:
+        print(f"An unexpected error occurred during translation: {e}")
+        return text_to_translate # Fallback to original text
+
 
 # Main execution block
 if __name__ == "__main__":
@@ -1136,7 +1224,7 @@ if __name__ == "__main__":
         print(f"Raw data saved to {json_file}")
         
         # Generate and save markdown summary
-        article = generate_summary_article(jobs)
+        article = generate_summary_article(jobs, selected_model)
         summary_file = f"backup/daad_phd_summary.md"
         with open(summary_file, "w", encoding="utf-8") as f:
             f.write(article)
