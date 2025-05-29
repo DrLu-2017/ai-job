@@ -8,10 +8,47 @@ import os
 from collections import defaultdict
 from selenium.common.exceptions import InvalidSessionIdException
 import sys
-import winreg
+import os # For checking OS type
 
 # Ensure UTF-8 encoding for standard output
 sys.stdout.reconfigure(encoding='utf-8')
+
+# Conditionally import winreg only on Windows
+if os.name == 'nt':
+    import winreg
+else:
+    # Provide a mock winreg object for non-Windows systems
+    # so that the functions that reference it can still be defined
+    # without causing an ImportError at definition time.
+    # The actual calls to winreg functions should be guarded by os.name check
+    # or mocked during tests.
+    class MockWinreg:
+        def __getattr__(self, name):
+            def dummy_function(*args, **kwargs):
+                # print(f"MockWinreg: {name} called with {args} {kwargs}")
+                pass # Does nothing
+            
+            # For constants like HKEY_CURRENT_USER, REG_SZ, KEY_SET_VALUE
+            if name in ("HKEY_CURRENT_USER", "REG_SZ", "KEY_SET_VALUE"):
+                return None # Or some dummy constant value
+            return dummy_function
+        
+        def OpenKey(self, *args, **kwargs):
+            return MockWinreg() # Return a context manager
+        
+        def SetValueEx(self, *args, **kwargs):
+            pass
+        
+        def CloseKey(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    winreg = MockWinreg()
 
 default_server_url = "http://rf-calcul:11434"  # Default to rf-calcul
 
@@ -60,14 +97,21 @@ def select_model():
 
 # 设置 Windows 系统代理（适用于大多数公司内网环境）
 def set_windows_proxy_from_pac(pac_url):
-    try:
-        # 设置自动配置脚本（PAC）
-        reg_path = r"Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path, 0, winreg.KEY_SET_VALUE) as key:
-            winreg.SetValueEx(key, "AutoConfigURL", 0, winreg.REG_SZ, pac_url)
-        print(f"已设置系统代理 PAC: {pac_url}")
-    except Exception as e:
-        print(f"设置系统代理失败: {e}")
+    if os.name == 'nt':
+        try:
+            # 设置自动配置脚本（PAC）
+            reg_path = r"Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"
+            # Ensure winreg was actually imported and not the mock
+            if hasattr(winreg, 'OpenKey') and not isinstance(winreg, MockWinreg): 
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path, 0, winreg.KEY_SET_VALUE) as key:
+                    winreg.SetValueEx(key, "AutoConfigURL", 0, winreg.REG_SZ, pac_url)
+                print(f"已设置系统代理 PAC: {pac_url}")
+            else:
+                print("winreg module not available or is mocked, skipping proxy set.")
+        except Exception as e:
+            print(f"设置系统代理失败: {e}")
+    else:
+        print("代理设置仅适用于Windows系统。")
 
 def fetch_job_detail(driver, url):
     driver.get(url)
@@ -244,7 +288,7 @@ def ollama_summarize(text, model="deepseek-r1:70b", host=None):
     for server in servers:
         try:
             # 限制文本长度，避免超出模型上下文窗口
-            text_truncated = text[:2000] if len(text) > 2000 else text  # Reduced context window to speed up processing
+            text_truncated = text[:8000] if len(text) > 8000 else text  # Increased context window
 
             prompt = f"请对以下学术招聘信息进行汇总和总结，重点提炼岗位要求、研究方向、单位、地点等关键信息：\n{text_truncated}"
 
@@ -297,7 +341,7 @@ def ollama_summarize(text, model="deepseek-r1:70b", host=None):
         print(f"尝试使用备用模型 {backup_model}...")
 
         # Use a simpler prompt with the last tried server
-        simple_prompt = f"请简要总结以下学术招聘信息的主要内容：\n\n{text_truncated[:1000]}"  # Reduced context further
+        simple_prompt = f"请简要总结以下学术招聘信息的主要内容：\n\n{text_truncated[:2000]}"  # Increased context for backup
         payload["model"] = backup_model
         payload["prompt"] = simple_prompt
 
@@ -334,7 +378,7 @@ def ollama_highlight(text, model="deepseek-r1:70b", host=None):
         f"3. 直接描述核心亮点，不要有'该职位'、'这个岗位'等词\n"
         f"4. 使用吸引人的表述，突出最具竞争力的方面\n\n"
         f"参考示例：\n{example}\n\n"
-        f"招聘信息：\n{text[:2000]}"  # 限制文本长度，避免超出模型上下文窗口
+        f"招聘信息：\n{text[:8000]}"  # Increased context window
     )
 
     # 标准化请求体格式
@@ -410,7 +454,7 @@ def ollama_highlight(text, model="deepseek-r1:70b", host=None):
 
     try:
         # Use a simpler prompt
-        simple_prompt = f"请用一段话总结以下学术招聘信息的主要亮点和特色：\n\n{text[:1000]}"
+        simple_prompt = f"请用一段话总结以下学术招聘信息的主要亮点和特色：\n\n{text[:2000]}" # Increased context for backup
         payload["model"] = backup_model
         payload["prompt"] = simple_prompt
 
@@ -501,7 +545,7 @@ def extract_direction(text):
                 return direction
     return '其他'
 
-def fetch_academic_positions_jobs(use_headless=True, selected_model=None):
+def fetch_academic_positions_jobs(use_headless=True, selected_model=None, num_jobs_to_fetch=10):
     """
     Fetch academic job postings and generate highlights using the specified model
     """
@@ -616,7 +660,7 @@ def fetch_academic_positions_jobs(use_headless=True, selected_model=None):
             pass
 
     job_cards = unique_cards
-    total_cards = min(len(job_cards), 10)  # 最多处理10个职位
+    total_cards = min(len(job_cards), num_jobs_to_fetch)  # 使用传入的参数
     print(f"检测到职位卡片数量: {len(job_cards)}，将处理前 {total_cards} 个")
 
     # 如果没有找到职位卡片，尝试截图以便调试
@@ -674,7 +718,7 @@ def fetch_academic_positions_jobs(use_headless=True, selected_model=None):
             })
             card_count += 1
             print(f"已解析职位卡片: {card_count}/{total_cards} ({int(card_count/total_cards*100)}%)")
-        if len(jobs) >= 10:
+        if len(jobs) >= total_cards: # 使用 total_cards 作为上限
             break
 
     # 依次访问每个职位详情页，获取所有字段
@@ -812,20 +856,35 @@ if __name__ == "__main__":
     selected_model = select_model()
     print(f"\n已选择模型: {selected_model}")
 
+    # Prompt user for the number of jobs to scrape
+    while True:
+        try:
+            num_to_scrape = int(input("请输入要爬取的职位数量 (例如 15): "))
+            if num_to_scrape > 0:
+                break
+            else:
+                print("请输入一个大于0的数字。")
+        except ValueError:
+            print("请输入有效的数字。")
+        except KeyboardInterrupt:
+            print("\n用户取消输入，将使用默认数量10。")
+            num_to_scrape = 10 # Default value on interruption
+            break
+
     print("\n=== 第1阶段：爬取职位信息 ===")
 
     # 首先尝试使用无头模式
     print("尝试使用无头模式爬取...")
     job_details = []
     try:
-        job_details = fetch_academic_positions_jobs(use_headless=True, selected_model=selected_model)
+        job_details = fetch_academic_positions_jobs(use_headless=True, selected_model=selected_model, num_jobs_to_fetch=num_to_scrape)
     except Exception as e:
         print(f"无头模式爬取失败: {e}")
 
     # 如果无头模式没有获取到职位，尝试使用有头模式
     if len(job_details) == 0:
         print("\n无头模式未能获取职位信息，尝试使用有头模式...")
-        job_details = fetch_academic_positions_jobs(use_headless=False, selected_model=selected_model)
+        job_details = fetch_academic_positions_jobs(use_headless=False, selected_model=selected_model, num_jobs_to_fetch=num_to_scrape)
 
     print(f"成功获取 {len(job_details)} 个职位信息")
 
