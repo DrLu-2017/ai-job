@@ -550,7 +550,8 @@ def fetch_academic_positions_jobs(use_headless=True, selected_model=None, num_jo
     Fetch academic job postings and generate highlights using the specified model
     """
     set_windows_proxy_from_pac("http://127.0.0.1:55624/proxy.pac")
-    url = "https://academicpositions.com/find-jobs?page=1"
+    base_url = "https://academicpositions.com/find-jobs"
+    current_page = 1
 
     # 设置Chrome选项
     options = webdriver.ChromeOptions()
@@ -614,15 +615,8 @@ def fetch_academic_positions_jobs(use_headless=True, selected_model=None, num_jo
     driver.set_page_load_timeout(30)
 
     print("正在访问招聘网站...")
-    driver.get(url)
-
-    # 等待页面加载
-    print("等待页面加载...")
-    time.sleep(5)  # 给页面足够的加载时间
-
-    print("页面加载完成，开始解析职位列表...")
-
     jobs = []
+    valid_jobs = 0  # Track number of valid jobs
 
     # 尝试多种选择器来查找职位卡片
     selectors = [
@@ -634,94 +628,106 @@ def fetch_academic_positions_jobs(use_headless=True, selected_model=None, num_jo
         "div.position",
         "a[href*='job']"
     ]
+    
+    while valid_jobs < num_jobs_to_fetch:
+        url = f"{base_url}?page={current_page}"
+        print(f"\n正在访问第 {current_page} 页...")
+        driver.get(url)
 
-    # 尝试所有选择器
-    job_cards = []
-    for selector in selectors:
-        try:
-            print(f"尝试使用选择器: {selector}")
-            cards = driver.find_elements(By.CSS_SELECTOR, selector)
-            if cards and len(cards) > 0:
-                print(f"  - 找到 {len(cards)} 个元素")
-                job_cards.extend(cards)
-        except Exception as e:
-            print(f"  - 选择器错误: {e}")
+        # 等待页面加载
+        print("等待页面加载...")
+        time.sleep(5)  # 给页面足够的加载时间
 
-    # 去重
-    unique_cards = []
-    card_texts = set()
-    for card in job_cards:
-        try:
-            card_text = card.text.strip()
-            if card_text and card_text not in card_texts:
-                card_texts.add(card_text)
-                unique_cards.append(card)
-        except:
-            pass
-
-    job_cards = unique_cards
-    total_cards = min(len(job_cards), num_jobs_to_fetch)  # 使用传入的参数
-    print(f"检测到职位卡片数量: {len(job_cards)}，将处理前 {total_cards} 个")
-
-    # 如果没有找到职位卡片，尝试截图以便调试
-    if len(job_cards) == 0:
-        try:
-            print("未找到职位卡片，保存页面截图以便调试...")
-            driver.save_screenshot("debug_screenshot.png")
-            print("截图已保存为 debug_screenshot.png")
-
-            # 保存页面源码
-            with open("debug_page_source.html", "w", encoding="utf-8") as f:
-                f.write(driver.page_source)
-            print("页面源码已保存为 debug_page_source.html")
-        except Exception as e:
-            print(f"保存调试信息失败: {e}")
-
-    card_count = 0
-    for card in job_cards:
-        # 提取职位标题
-        title = ""
-        title_elem = None
-        for tag in ["h2", "h3", "a", "span"]:
+        # 尝试所有选择器
+        job_cards = []
+        for selector in selectors:
             try:
-                title_elem = card.find_element(By.CSS_SELECTOR, f"{tag}[class*='title']")
-                if title_elem.text.strip():
-                    title = title_elem.text.strip()
-                    break
+                print(f"尝试使用选择器: {selector}")
+                cards = driver.find_elements(By.CSS_SELECTOR, selector)
+                if cards and len(cards) > 0:
+                    print(f"  - 找到 {len(cards)} 个元素")
+                    job_cards.extend(cards)
+            except Exception as e:
+                print(f"  - 选择器错误: {e}")
+
+        # 去重
+        unique_cards = []
+        card_texts = set()
+        for card in job_cards:
+            try:
+                card_text = card.text.strip()
+                if card_text and card_text not in card_texts:
+                    card_texts.add(card_text)
+                    unique_cards.append(card)
             except:
-                continue
-        # 提取单位
-        institution = ""
-        try:
-            institution = card.find_element(By.CSS_SELECTOR, "a.job-link,span[class*='employer']").text.strip()
-        except:
-            pass
-        # 提取地点
-        location = ""
-        try:
-            location = card.find_element(By.CSS_SELECTOR, ".job-locations,span[class*='location']").text.strip()
-        except:
-            pass
-        # 提取链接
-        link = ""
-        try:
-            link_elem = card.find_element(By.CSS_SELECTOR, "a.job-link")
-            link = link_elem.get_attribute("href")
-        except:
-            pass
-        if title and institution:
-            jobs.append({
-                "title": title,
-                "institution": institution,
-                "location": location,
-                "link": link
-            })
-            card_count += 1
-            print(f"已解析职位卡片: {card_count}/{total_cards} ({int(card_count/total_cards*100)}%)")
-        if len(jobs) >= total_cards: # 使用 total_cards 作为上限
+                pass
+        
+        job_cards = unique_cards
+        print(f"第 {current_page} 页检测到职位卡片数量: {len(job_cards)}")
+
+        # 如果这一页没有找到任何卡片，可能已经到达最后一页
+        if len(job_cards) == 0:
+            print("没有找到更多职位，可能已到达最后一页")
             break
 
-    # 依次访问每个职位详情页，获取所有字段
+        # 处理本页的职位卡片
+        for card in job_cards:
+            # 提取职位标题
+            title = ""
+            title_elem = None
+            for tag in ["h2", "h3", "a", "span"]:
+                try:
+                    title_elem = card.find_element(By.CSS_SELECTOR, f"{tag}[class*='title']")
+                    if title_elem.text.strip():
+                        title = title_elem.text.strip()
+                        break
+                except:
+                    continue
+            
+            # 提取单位
+            institution = ""
+            try:
+                institution = card.find_element(By.CSS_SELECTOR, "a.job-link,span[class*='employer']").text.strip()
+            except:
+                pass
+            
+            # 提取地点
+            location = ""
+            try:
+                location = card.find_element(By.CSS_SELECTOR, ".job-locations,span[class*='location']").text.strip()
+            except:
+                pass
+            
+            # 提取链接
+            link = ""
+            try:
+                link_elem = card.find_element(By.CSS_SELECTOR, "a.job-link")
+                link = link_elem.get_attribute("href")
+            except:
+                pass
+                
+            # Only process if we have both title and institution
+            if title and institution and valid_jobs < num_jobs_to_fetch:
+                jobs.append({
+                    "title": title,
+                    "institution": institution,
+                    "location": location,
+                    "link": link
+                })
+                valid_jobs += 1
+                print(f"已解析职位卡片: {valid_jobs}/{num_jobs_to_fetch} ({int(valid_jobs/num_jobs_to_fetch*100)}%)")
+                
+                if valid_jobs >= num_jobs_to_fetch:
+                    break
+
+        # 如果已经获取足够的职位，退出循环
+        if valid_jobs >= num_jobs_to_fetch:
+            break
+
+        # 尝试下一页
+        current_page += 1
+        
+    # 继续处理职位详情
     job_details = []
     print("\n开始获取职位详情...")
     for i, job in enumerate(jobs):
@@ -866,10 +872,10 @@ if __name__ == "__main__":
                 print("请输入一个大于0的数字。")
         except ValueError:
             print("请输入有效的数字。")
-        except KeyboardInterrupt:
-            print("\n用户取消输入，将使用默认数量10。")
-            num_to_scrape = 10 # Default value on interruption
-            break
+        #except KeyboardInterrupt:
+        #    print("\n用户取消输入，将使用默认数量10。")
+        #    num_to_scrape = 10 # Default value on interruption
+        #    break
 
     print("\n=== 第1阶段：爬取职位信息 ===")
 
@@ -884,7 +890,7 @@ if __name__ == "__main__":
     # 如果无头模式没有获取到职位，尝试使用有头模式
     if len(job_details) == 0:
         print("\n无头模式未能获取职位信息，尝试使用有头模式...")
-        job_details = fetch_academic_positions_jobs(use_headless=False, selected_model=selected_model, num_jobs_to_fetch=num_to_scrape)
+        job_details = fetch_academic_positions_jobs(use_headless=False, selected_model=selected_model, num_jobs_to_scrape=num_to_scrape)
 
     print(f"成功获取 {len(job_details)} 个职位信息")
 
