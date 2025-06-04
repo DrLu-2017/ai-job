@@ -5,50 +5,158 @@ import time
 import requests
 import re
 import os
+import subprocess
 from collections import defaultdict
 from selenium.common.exceptions import InvalidSessionIdException
 import sys
 import os # For checking OS type
+import zipfile
+import shutil
 
 # Ensure UTF-8 encoding for standard output
 sys.stdout.reconfigure(encoding='utf-8')
+
+class MockWinreg:
+    def __getattr__(self, name):
+        def dummy_function(*args, **kwargs):
+            pass
+        
+        # For constants like HKEY_CURRENT_USER, REG_SZ, KEY_SET_VALUE
+        if name in ("HKEY_CURRENT_USER", "REG_SZ", "KEY_SET_VALUE"):
+            return None
+        return dummy_function
+    
+    def OpenKey(self, *args, **kwargs):
+        return self
+    
+    def SetValueEx(self, *args, **kwargs):
+        pass
+    
+    def CloseKey(self, *args, **kwargs):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
 
 # Conditionally import winreg only on Windows
 if os.name == 'nt':
     import winreg
 else:
-    # Provide a mock winreg object for non-Windows systems
-    # so that the functions that reference it can still be defined
-    # without causing an ImportError at definition time.
-    # The actual calls to winreg functions should be guarded by os.name check
-    # or mocked during tests.
-    class MockWinreg:
-        def __getattr__(self, name):
-            def dummy_function(*args, **kwargs):
-                # print(f"MockWinreg: {name} called with {args} {kwargs}")
-                pass # Does nothing
-            
-            # For constants like HKEY_CURRENT_USER, REG_SZ, KEY_SET_VALUE
-            if name in ("HKEY_CURRENT_USER", "REG_SZ", "KEY_SET_VALUE"):
-                return None # Or some dummy constant value
-            return dummy_function
-        
-        def OpenKey(self, *args, **kwargs):
-            return MockWinreg() # Return a context manager
-        
-        def SetValueEx(self, *args, **kwargs):
-            pass
-        
-        def CloseKey(self, *args, **kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            pass
-
     winreg = MockWinreg()
+
+def get_chrome_version():
+    """Get the version of Chrome installed on Windows"""
+    try:
+        # Try to get Chrome version from Windows registry
+        if os.name == 'nt':  # Windows
+            try:
+                key_path = r"SOFTWARE\Google\Chrome\BLBeacon"
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path)
+                version, _ = winreg.QueryValueEx(key, "version")
+                major_version = version.split('.')[0]
+                return major_version
+            except Exception as e:
+                print(f"Registry lookup failed: {e}")
+        
+        # Fallback: try to get version from Chrome executable
+        chrome_path = ""
+        if os.name == 'nt':  # Windows
+            chrome_path = r'C:\Program Files\Google\Chrome\Application\chrome.exe'
+            if not os.path.exists(chrome_path):
+                chrome_path = r'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe'
+        else:  # Linux/Mac
+            chrome_path = 'google-chrome'
+        
+        if os.name == 'nt':
+            # Use Windows where command
+            result = subprocess.run(['where', chrome_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if result.returncode == 0:
+                chrome_path = result.stdout.strip()
+        else:
+            # Use which command on Linux/Mac
+            result = subprocess.run(['which', chrome_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if result.returncode == 0:
+                chrome_path = result.stdout.strip()
+        
+        # Get version string
+        if os.name == 'nt':
+            process = subprocess.Popen([chrome_path, '--version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        else:
+            process = subprocess.Popen(['google-chrome', '--version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        
+        output, _ = process.communicate()
+        version = output.decode('utf-8').strip().split()[-1]
+        major_version = version.split('.')[0]
+        return major_version
+    except Exception as e:
+        print(f"Error getting Chrome version: {e}")
+        return None
+
+def download_chromedriver():
+    """Download the appropriate version of ChromeDriver"""
+    try:
+        chrome_version = get_chrome_version()
+        if not chrome_version:
+            print("Could not determine Chrome version, using latest stable ChromeDriver")
+            chrome_version = "stable"
+        
+        print(f"Detected Chrome version: {chrome_version}")
+        
+        # Get the download URL for the matching ChromeDriver version
+        version_url = f"https://chromedriver.storage.googleapis.com/LATEST_RELEASE_{chrome_version}"
+        print(f"Checking ChromeDriver version at: {version_url}")
+        
+        response = requests.get(version_url)
+        if response.status_code != 200:
+            print("Could not find exact version match, trying stable version")
+            version_url = "https://chromedriver.storage.googleapis.com/LATEST_RELEASE"
+            response = requests.get(version_url)
+            
+        chromedriver_version = response.text.strip()
+        print(f"ChromeDriver version to download: {chromedriver_version}")
+        
+        # Determine platform
+        platform = 'win32' if os.name == 'nt' else 'linux64'
+        if platform == 'win32':
+            download_url = f"https://chromedriver.storage.googleapis.com/{chromedriver_version}/chromedriver_win32.zip"
+        else:
+            download_url = f"https://chromedriver.storage.googleapis.com/{chromedriver_version}/chromedriver_linux64.zip"
+        
+        print(f"Downloading ChromeDriver from: {download_url}")
+        response = requests.get(download_url)
+        
+        # Save the zip file
+        with open("chromedriver.zip", "wb") as f:
+            f.write(response.content)
+        
+        # Create a backup of existing chromedriver if it exists
+        if os.path.exists("chromedriver.exe"):
+            backup_name = "chromedriver.exe.backup"
+            try:
+                shutil.move("chromedriver.exe", backup_name)
+                print(f"Backed up existing ChromeDriver to {backup_name}")
+            except Exception as e:
+                print(f"Failed to backup existing ChromeDriver: {e}")
+        
+        # Extract the zip file
+        with zipfile.ZipFile("chromedriver.zip", "r") as zip_ref:
+            zip_ref.extractall(".")
+        
+        # Clean up
+        os.remove("chromedriver.zip")
+        print("Successfully downloaded and extracted new ChromeDriver")
+        
+        # Make chromedriver executable on Linux
+        if platform != 'win32':
+            os.chmod("chromedriver", 0o755)
+        
+        return True
+    except Exception as e:
+        print(f"Error downloading ChromeDriver: {e}")
+        return False
 
 default_server_url = "http://rf-calcul:11434"  # Default to rf-calcul
 
