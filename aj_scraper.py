@@ -252,12 +252,21 @@ def fetch_job_detail(driver, url):
         posted = ''
     # 合同周期
     contract = ''
-    for kw in ['contract', 'duration', '周期', '期限', 'term']:
+    contract_keywords = ['contract', 'duration', '周期', '期限', 'term', '合同时间']
+    for kw in contract_keywords:
         m = re.search(rf'{kw}[:：]?\s*([\w\- ]+)', content, re.IGNORECASE)
         if m:
             contract = m.group(1).strip()
             break
-    return title, content, institution, location, posted, contract
+    # 开始时间
+    start_date = ''
+    start_date_keywords = ["start date", "commencement date", "开始时间"]
+    for kw in start_date_keywords:
+        m = re.search(rf'{kw}[:：]?\s*([\w\- ]+)', content, re.IGNORECASE)
+        if m:
+            start_date = m.group(1).strip()
+            break
+    return title, content, institution, location, posted, contract, start_date
 
 def check_model_availability(model, host=None):
     """Check if a specific model is available and loaded. Returns True if available, False if not."""
@@ -841,7 +850,7 @@ def fetch_academic_positions_jobs(use_headless=True, selected_model=None, num_jo
     for i, job in enumerate(jobs):
         print(f"正在处理职位 {i+1}/{len(jobs)} ({int((i+1)/len(jobs)*100)}%): {job['title'][:30]}...")
         try:
-            detail_title, detail_content, inst2, loc2, posted, contract = fetch_job_detail(driver, job['link'])
+            detail_title, detail_content, inst2, loc2, posted, contract, start_date = fetch_job_detail(driver, job['link'])
         except InvalidSessionIdException:
             # 重新启动driver并重试
             print("浏览器会话失效，正在重新启动...")
@@ -874,7 +883,7 @@ def fetch_academic_positions_jobs(use_headless=True, selected_model=None, num_jo
 
             # 设置页面加载超时
             driver.set_page_load_timeout(30)
-            detail_title, detail_content, inst2, loc2, posted, contract = fetch_job_detail(driver, job['link'])
+            detail_title, detail_content, inst2, loc2, posted, contract, start_date = fetch_job_detail(driver, job['link'])
         # 优先用详情页数据补全
         institution = inst2 or job.get('institution', '')
         location = loc2 or job.get('location', '')
@@ -892,6 +901,7 @@ def fetch_academic_positions_jobs(use_headless=True, selected_model=None, num_jo
             "location": location,
             "posted": posted,
             "contract": contract,
+            "start_date": start_date,
             "highlight": highlight
         })
         print(f"职位 {i+1}/{len(jobs)} 处理完成")
@@ -944,16 +954,38 @@ def generate_summary_article(job_details, today=None):
                 # 合同周期
                 contract = job.get('contract', '').strip()                
                 if contract:
-                    article += f"**合同周期:** {contract}\n\n"
+                    article += f"**Contract Duration:** {contract}\n\n"
                 
-                # 职位详情链接 - show in requested format
-                link = job.get('link', '').strip()
-                if link:
-                    article += f"查看职位详情({link})\n\n"
+                # 开始时间
+                start_date = job.get('start_date', '').strip()
+                if start_date:
+                    article += f"**Start Date:** {start_date}\n\n"
 
                 # 分隔线
                 article += "---\n\n"
     return article
+
+def generate_report2(job_details, today=None):
+    if today is None:
+        from datetime import datetime
+        today = datetime.now().strftime('%Y-%m-%d')
+
+    report_content = f"# 科研职位信息简报 ({today})\n\n"
+
+    for job in job_details:
+        report_content += f"## {job.get('title', 'N/A')}\n\n" # Use .get for safety
+
+        content = job.get('content', '')
+        job_summary = content[:200] + "..." if len(content) > 200 else content
+        report_content += f"{job_summary}\n\n"
+
+        link = job.get('link', '')
+        if link: # Only add link if it exists
+            report_content += f"查看职位详情({link})\n\n"
+
+        report_content += "---\n\n"
+
+    return report_content
 
 # 示例用法：
 if __name__ == "__main__":
@@ -1009,14 +1041,22 @@ if __name__ == "__main__":
 
     # Generate and save the report
     print("\n=== 第2阶段：生成报告 ===")
-    print("正在生成报告...")
     from datetime import datetime
     today = datetime.now().strftime('%Y-%m-%d')
-    article = generate_summary_article(job_details, today=today)
 
-    print("正在保存报告...")
-    with open('academic_job_summary.md', 'w', encoding='utf-8') as f:
+    print("正在生成报告1...")
+    article = generate_summary_article(job_details, today=today)
+    print("正在保存报告1...")
+    with open('academic_job_summary_report1.md', 'w', encoding='utf-8') as f:
         f.write(article)
+    print("已生成 academic_job_summary_report1.md")
+
+    print("\n正在生成报告2...")
+    report2_content = generate_report2(job_details, today=today)
+    print("正在保存报告2...")
+    with open('academic_job_summary_report2.md', 'w', encoding='utf-8') as f:
+        f.write(report2_content)
+    print("已生成 academic_job_summary_report2.md")
 
     print("\n=== 完成 ===")
-    print('已生成 academic_job_summary.md，可直接粘贴到公众号后台。')
+    print('已生成 academic_job_summary_report1.md 和 academic_job_summary_report2.md')
